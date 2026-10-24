@@ -215,6 +215,18 @@ class DroneApp:
             padx=10
         )
 
+        # Bagimsiz ARM / DISARM kontrolleri
+        arm_row = ttk.Frame(manual)
+        arm_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        arm_row.columnconfigure(0, weight=1)
+        arm_row.columnconfigure(1, weight=1)
+
+        self.arm_btn = ttk.Button(arm_row, text="ARM", command=self.manual_arm)
+        self.arm_btn.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+
+        self.disarm_btn = ttk.Button(arm_row, text="DISARM", command=self.manual_disarm)
+        self.disarm_btn.grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
         self.takeoff_btn = ttk.Button(
             manual,
             text="TAKEOFF",
@@ -222,7 +234,7 @@ class DroneApp:
         )
 
         self.takeoff_btn.grid(
-            row=1,
+            row=2,
             column=0,
             columnspan=2,
             sticky="ew",
@@ -532,6 +544,83 @@ class DroneApp:
             )
 
     # ==================================================
+    # 4. MANUEL ARM / DISARM
+    # ==================================================
+
+    def manual_arm(self):
+        c = self.controller
+        if (self.action_busy or self.emergency_busy or c.mission_running
+                or c.emergency_active.is_set()):
+            return
+        if not c.is_connection_alive():
+            messagebox.showerror("Baglanti", "MAVLink baglantisi aktif degil.")
+            return
+        if c.armed:
+            self.info_var.set("IHA zaten ARM durumunda.")
+            return
+        if not c.is_landed_state_fresh() or c.landed_state != 1:
+            messagebox.showwarning("ARM", "Guncel telemetri IHA'nin yerde oldugunu dogrulamiyor.")
+            return
+
+        self.action_busy = True
+        self.info_var.set("ARM: GUIDED modu ve ARM durumu dogrulaniyor...")
+
+        def operation():
+            if not c.change_mode("GUIDED") or not c.wait_for_mode("GUIDED"):
+                return False
+            return c.arm() and c.wait_for_arm()
+
+        self.run_background(operation, self.arm_done)
+
+    def arm_done(self, result, error):
+        self.action_busy = False
+        self.info_var.set(
+            "ARM basarili. IHA kalkisa hazir." if result
+            else f"ARM basarisiz: {error or 'Terminali ve ArduPilot on-arm kontrollerini inceleyin.'}"
+        )
+
+    def manual_disarm(self):
+        c = self.controller
+        if (self.action_busy or self.emergency_busy or c.mission_running):
+            return
+        if not c.is_connection_alive():
+            messagebox.showerror("Baglanti", "MAVLink baglantisi aktif degil.")
+            return
+        if not c.armed:
+            self.info_var.set("IHA zaten DISARM durumunda.")
+            return
+        if not c.is_landed_state_fresh() or c.landed_state != 1:
+            messagebox.showwarning("Guvenlik", "DISARM engellendi: IHA'nin yerde oldugu dogrulanamiyor.")
+            return
+        if not messagebox.askyesno("DISARM", "IHA yerde. Motorlari devre disi birakmak istiyor musunuz?"):
+            return
+
+        self.action_busy = True
+        self.info_var.set("DISARM komutu gonderiliyor...")
+
+        def operation():
+            if not c.disarm():
+                return False
+            import time
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if not c.is_connection_alive():
+                    return False
+                if not c.armed:
+                    return True
+                time.sleep(0.1)
+            return False
+
+        self.run_background(operation, self.disarm_done)
+
+    def disarm_done(self, result, error):
+        self.action_busy = False
+        self.info_var.set(
+            "DISARM basarili. Motorlar devre disi." if result
+            else f"DISARM dogrulanamadi: {error or 'Telemetriyi ve terminali kontrol edin.'}"
+        )
+
+    # ==================================================
     # 4. TAKEOFF
     # ==================================================
 
@@ -579,18 +668,7 @@ class DroneApp:
 
             return
 
-        # Havadaki IHA'ya ikinci kez TAKEOFF gonderme.
-        if c.armed:
-
-            messagebox.showwarning(
-                "ARM",
-                "IHA zaten ARM durumunda. "
-                "Yeni TAKEOFF icin once guvenli sekilde "
-                "inis yapip DISARM olmasini bekleyin."
-            )
-
-            return
-
+        # ARM butonuyla onceden ARM edilmis IHA da kalkis yapabilir.
         # Inis durumu biliniyorsa havada kalkisi engelle.
         # Bilgi eksikse controller ARM asamasinda
         # kendi guvenlik kontrolunu uygulayacak.
@@ -1152,7 +1230,20 @@ class DroneApp:
             and not c.emergency_active.is_set()
             and not self.action_busy
             and not self.emergency_busy
-            and not c.armed
+        )
+
+        self.arm_btn.configure(
+            state="normal" if normal_allowed and not c.armed
+            and c.is_landed_state_fresh() and c.landed_state == 1
+            else "disabled"
+        )
+
+        self.disarm_btn.configure(
+            state="normal" if alive and c.armed
+            and not c.mission_running and not self.action_busy
+            and not self.emergency_busy and c.is_landed_state_fresh()
+            and c.landed_state == 1
+            else "disabled"
         )
 
         self.takeoff_btn.configure(
@@ -1163,7 +1254,7 @@ class DroneApp:
 
         self.start_btn.configure(
             state="normal"
-            if normal_allowed
+            if normal_allowed and not c.armed
             else "disabled"
         )
 
